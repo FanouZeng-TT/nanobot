@@ -140,6 +140,7 @@ class FallbackProvider(LLMProvider):
         self._has_fallbacks = bool(fallback_presets)
         self._primary_failures = 0
         self._primary_tripped_at: float | None = None
+        self._primary_probe_in_flight = False
 
     @property
     def generation(self) -> GenerationSettings:
@@ -191,13 +192,15 @@ class FallbackProvider(LLMProvider):
         )
 
     def _primary_available(self) -> bool:
-        """Return True if the primary provider is not currently tripped."""
+        """Reserve the primary for a normal call or the single half-open probe."""
         if self._primary_tripped_at is None:
             return True
-        if time.monotonic() - self._primary_tripped_at >= _PRIMARY_COOLDOWN_S:
-            # Half-open: allow one probe attempt.
-            return True
-        return False
+        if time.monotonic() - self._primary_tripped_at < _PRIMARY_COOLDOWN_S:
+            return False
+        if self._primary_probe_in_flight:
+            return False
+        self._primary_probe_in_flight = True
+        return True
 
     async def chat(self, **kwargs: Any) -> LLMResponse:
         if not self._has_fallbacks:
@@ -456,11 +459,18 @@ class FallbackProvider(LLMProvider):
         # continuation, so the incoming primary state remains reusable.
         preserve_primary_state = True
 
-        if self._primary_available():
+        primary_available = self._primary_available()
+        if primary_available:
+            primary_was_probe = self._primary_probe_in_flight
             primary_was_attempted = True
-            response, primary_exception = await self._call_provider(
-                call, self._primary, kwargs
-            )
+            try:
+                response, primary_exception = await self._call_provider(
+                    call, self._primary, kwargs
+                )
+            except asyncio.CancelledError:
+                if primary_was_probe:
+                    self._primary_probe_in_flight = False
+                raise
             if primary_exception is not None:
                 logger.warning(
                     "Primary model '{}' raised {} before responding",
@@ -469,6 +479,7 @@ class FallbackProvider(LLMProvider):
             if response.finish_reason != "error":
                 self._primary_failures = 0
                 self._primary_tripped_at = None
+                self._primary_probe_in_flight = False
                 return response
             primary_response = response
             primary_error = (response.content or primary_error)[:120]
@@ -490,6 +501,8 @@ class FallbackProvider(LLMProvider):
                     logger.warning(
                         "Primary model error but content already streamed; skipping failover"
                     )
+                    if primary_was_probe:
+                        self._primary_probe_in_flight = False
                     return response
 
             if not self._should_fallback(response):
@@ -498,8 +511,12 @@ class FallbackProvider(LLMProvider):
                     primary_model,
                     (response.content or "")[:120],
                 )
+                if primary_was_probe:
+                    self._primary_probe_in_flight = False
                 return response
 
+            if primary_was_probe:
+                self._primary_probe_in_flight = False
             self._primary_failures += 1
             if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
                 self._primary_tripped_at = time.monotonic()
