@@ -430,6 +430,13 @@ class ReadFileTool(_FsTool):
                     if chars > self._MAX_CHARS:
                         break
                     trimmed.append(line)
+                if not trimmed:
+                    # A single line longer than the budget would otherwise
+                    # produce an empty body and a continuation hint that points
+                    # at the same line forever. Emit a truncated prefix of
+                    # that line so the range stays readable and the hint moves
+                    # on to the next line.
+                    trimmed = [numbered[0][: self._MAX_CHARS]]
                 end = start + len(trimmed)
                 result = "\n".join(trimmed)
 

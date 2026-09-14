@@ -99,6 +99,36 @@ class TestReadFileTool:
         assert "Use offset=" in result
 
     @pytest.mark.asyncio
+    async def test_single_line_over_char_budget_is_truncated_not_dropped(self, tool, tmp_path):
+        """A line longer than the budget is truncated, never silently dropped."""
+        f = tmp_path / "minified.txt"
+        f.write_text(
+            "\n".join(["x" * (ReadFileTool._MAX_CHARS + 10_000), "second"]), encoding="utf-8"
+        )
+
+        result = await tool.execute(path=str(f))
+
+        assert result.startswith("1| ")
+        assert len(result) <= ReadFileTool._MAX_CHARS + 500
+        assert "Use offset=2 to continue" in result
+
+    @pytest.mark.asyncio
+    async def test_huge_middle_line_stays_reachable(self, tool, tmp_path):
+        """Following the continuation hint must reach the line after a huge line."""
+        f = tmp_path / "middle.txt"
+        f.write_text(
+            "\n".join(["first", "y" * (ReadFileTool._MAX_CHARS + 10_000), "last"]),
+            encoding="utf-8",
+        )
+
+        first = await tool.execute(path=str(f))
+        assert "Use offset=2 to continue" in first
+
+        second = await tool.execute(path=str(f), offset=2)
+        assert second.startswith("2| ")
+        assert "Use offset=3 to continue" in second
+
+    @pytest.mark.asyncio
     async def test_oversized_file_is_rejected_before_read(self, tool, tmp_path, monkeypatch):
         f = tmp_path / "huge.txt"
         with f.open("wb") as stream:
