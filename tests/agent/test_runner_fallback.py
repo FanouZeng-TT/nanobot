@@ -1886,6 +1886,32 @@ class TestCircuitBreaker:
 
         assert fb._primary_probe_in_flight is False
 
+    @pytest.mark.asyncio
+    async def test_cancelled_half_open_stream_recovery_releases_reservation(self) -> None:
+        primary = _FakeProvider(
+            "primary",
+            _make_response("partial", finish_reason="error", error_kind="timeout"),
+        )
+        fb = FallbackProvider(
+            primary=primary,
+            fallback_presets=[_fallback("fallback-a")],
+            provider_factory=MagicMock(return_value=_FakeProvider("fallback")),
+        )
+        fb._primary_tripped_at = 100.0
+
+        async def cancel_recovery() -> None:
+            raise asyncio.CancelledError
+
+        with patch("nanobot.providers.fallback_provider.time.monotonic", return_value=161.0):
+            with pytest.raises(asyncio.CancelledError):
+                await fb.chat_stream(
+                    messages=[{"role": "user", "content": "one"}],
+                    on_content_delta=AsyncMock(),
+                    on_stream_recover=cancel_recovery,
+                )
+
+        assert fb._primary_probe_in_flight is False
+
 
 class TestGenerationForwarded:
     def test(self) -> None:

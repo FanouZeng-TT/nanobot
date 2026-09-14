@@ -467,63 +467,63 @@ class FallbackProvider(LLMProvider):
                 response, primary_exception = await self._call_provider(
                     call, self._primary, kwargs
                 )
-            except asyncio.CancelledError:
-                if primary_was_probe:
-                    self._primary_probe_in_flight = False
-                raise
-            if primary_exception is not None:
-                logger.warning(
-                    "Primary model '{}' raised {} before responding",
-                    primary_model, type(primary_exception).__name__,
-                )
-            if response.finish_reason != "error":
-                self._primary_failures = 0
-                self._primary_tripped_at = None
-                self._primary_probe_in_flight = False
-                return response
-            primary_response = response
-            primary_error = (response.content or primary_error)[:120]
-
-            if has_streamed is not None and has_streamed[0]:
-                is_timeout = (response.error_kind or "").lower() == "timeout"
-                if is_timeout:
+                if primary_exception is not None:
                     logger.warning(
-                        "Primary model '{}' stream stalled after content was emitted; "
-                        "attempting failover anyway",
-                        primary_model,
+                        "Primary model '{}' raised {} before responding",
+                        primary_model, type(primary_exception).__name__,
                     )
-                    has_streamed[0] = False
-                    if on_stream_recover:
-                        await on_stream_recover()
+                if response.finish_reason != "error":
+                    self._primary_failures = 0
+                    self._primary_tripped_at = None
+                    self._primary_probe_in_flight = False
+                    return response
+                primary_response = response
+                primary_error = (response.content or primary_error)[:120]
+
+                if has_streamed is not None and has_streamed[0]:
+                    is_timeout = (response.error_kind or "").lower() == "timeout"
+                    if is_timeout:
+                        logger.warning(
+                            "Primary model '{}' stream stalled after content was emitted; "
+                            "attempting failover anyway",
+                            primary_model,
+                        )
+                        has_streamed[0] = False
+                        if on_stream_recover:
+                            await on_stream_recover()
+                        else:
+                            kwargs["on_content_delta"] = None
                     else:
-                        kwargs["on_content_delta"] = None
-                else:
+                        logger.warning(
+                            "Primary model error but content already streamed; skipping failover"
+                        )
+                        if primary_was_probe:
+                            self._primary_probe_in_flight = False
+                        return response
+
+                if not self._should_fallback(response):
                     logger.warning(
-                        "Primary model error but content already streamed; skipping failover"
+                        "Primary model '{}' failed with non-fallbackable error: {}",
+                        primary_model,
+                        (response.content or "")[:120],
                     )
                     if primary_was_probe:
                         self._primary_probe_in_flight = False
                     return response
 
-            if not self._should_fallback(response):
-                logger.warning(
-                    "Primary model '{}' failed with non-fallbackable error: {}",
-                    primary_model,
-                    (response.content or "")[:120],
-                )
                 if primary_was_probe:
                     self._primary_probe_in_flight = False
-                return response
-
-            if primary_was_probe:
-                self._primary_probe_in_flight = False
-            self._primary_failures += 1
-            if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
-                self._primary_tripped_at = time.monotonic()
-                logger.warning(
-                    "Primary model '{}' circuit open after {} consecutive failures",
-                    primary_model, self._primary_failures,
-                )
+                self._primary_failures += 1
+                if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
+                    self._primary_tripped_at = time.monotonic()
+                    logger.warning(
+                        "Primary model '{}' circuit open after {} consecutive failures",
+                        primary_model, self._primary_failures,
+                    )
+            except asyncio.CancelledError:
+                if primary_was_probe:
+                    self._primary_probe_in_flight = False
+                raise
         else:
             logger.debug("Primary model '{}' circuit open; skipping", primary_model)
 
