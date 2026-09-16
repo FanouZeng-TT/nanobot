@@ -1913,6 +1913,52 @@ class TestCircuitBreaker:
         assert fb._primary_probe_in_flight is False
 
 
+    @pytest.mark.asyncio
+    async def test_half_open_stream_recovery_error_releases_reservation(self) -> None:
+        primary = _FakeProvider(
+            "primary",
+            _make_response("partial", finish_reason="error", error_kind="timeout"),
+        )
+        fallback = _FakeProvider("fallback", _make_response("fallback ok"))
+        fb = FallbackProvider(
+            primary=primary,
+            fallback_presets=[_fallback("fallback-a")],
+            provider_factory=MagicMock(return_value=fallback),
+        )
+        fb._primary_tripped_at = 100.0
+        recovery_started = asyncio.Event()
+        release_recovery = asyncio.Event()
+
+        async def failed_recovery() -> None:
+            recovery_started.set()
+            await release_recovery.wait()
+            raise OSError("stream sink unavailable")
+
+        with patch("nanobot.providers.fallback_provider.time.monotonic", return_value=161.0):
+            probe = asyncio.create_task(fb.chat_stream(
+                messages=[{"role": "user", "content": "one"}],
+                on_content_delta=AsyncMock(),
+                on_stream_recover=failed_recovery,
+            ))
+            await recovery_started.wait()
+            concurrent = await fb.chat(messages=[{"role": "user", "content": "two"}])
+            assert concurrent.content == "fallback ok"
+            assert fb._primary_probe_in_flight is True
+            assert primary.chat_calls == []
+
+            release_recovery.set()
+            with pytest.raises(OSError, match="stream sink unavailable"):
+                await probe
+            assert fb._primary_probe_in_flight is False
+
+            primary._response = _make_response("primary recovered")
+            result = await fb.chat(messages=[{"role": "user", "content": "three"}])
+
+        assert result.content == "primary recovered"
+        assert len(primary.chat_calls) == len(primary.chat_stream_calls) == 1
+        assert len(fallback.chat_calls) == 1
+
+
 class TestGenerationForwarded:
     def test(self) -> None:
         from nanobot.providers.base import GenerationSettings

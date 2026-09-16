@@ -497,8 +497,6 @@ class FallbackProvider(LLMProvider):
                         logger.warning(
                             "Primary model error but content already streamed; skipping failover"
                         )
-                        if primary_was_probe:
-                            self._primary_probe_in_flight = False
                         return response
 
                 if not self._should_fallback(response):
@@ -507,12 +505,8 @@ class FallbackProvider(LLMProvider):
                         primary_model,
                         (response.content or "")[:120],
                     )
-                    if primary_was_probe:
-                        self._primary_probe_in_flight = False
                     return response
 
-                if primary_was_probe:
-                    self._primary_probe_in_flight = False
                 self._primary_failures += 1
                 if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
                     self._primary_tripped_at = time.monotonic()
@@ -520,10 +514,11 @@ class FallbackProvider(LLMProvider):
                         "Primary model '{}' circuit open after {} consecutive failures",
                         primary_model, self._primary_failures,
                     )
-            except asyncio.CancelledError:
+            finally:
+                # Recovery callbacks can fail as well as be cancelled. Only
+                # this probe owns the reservation through all exit paths.
                 if primary_was_probe:
                     self._primary_probe_in_flight = False
-                raise
         else:
             logger.debug("Primary model '{}' circuit open; skipping", primary_model)
 
